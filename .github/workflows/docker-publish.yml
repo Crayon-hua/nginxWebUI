@@ -1,0 +1,82 @@
+name: Build and publish Docker image
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+          cache: maven
+
+      - name: Build jar
+        run: mvn -B clean package -DskipTests
+
+      - name: Read version and image names
+        id: meta
+        run: |
+          VER=$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
+          OWNER_LC=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=ghcr.io/${OWNER_LC}/nginxwebui" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Aliyun Container Registry (optional)
+        if: github.event_name != 'pull_request' && vars.ALIYUN_IMAGE != ''
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-hangzhou.aliyuncs.com
+          username: ${{ secrets.ALIYUN_REGISTRY_USER }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Build and push GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ steps.meta.outputs.ghcr_image }}:latest
+            ${{ steps.meta.outputs.ghcr_image }}:${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Mirror to Aliyun (optional)
+        if: github.event_name != 'pull_request' && vars.ALIYUN_IMAGE != ''
+        run: |
+          SRC="${{ steps.meta.outputs.ghcr_image }}:${{ steps.meta.outputs.version }}"
+          DST="${{ vars.ALIYUN_IMAGE }}"
+          docker buildx imagetools create \
+            --tag "${DST}:latest" \
+            --tag "${DST}:${{ steps.meta.outputs.version }}" \
+            "$SRC"
